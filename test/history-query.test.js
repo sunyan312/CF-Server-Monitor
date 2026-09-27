@@ -10,8 +10,14 @@ import {
   DEFAULT_LONG_HISTORY_POINTS,
   normalizeLongHistoryPoints
 } from '../src/utils/settings.js';
+import { HISTORY_ALL_QUERY_COLUMNS } from '../src/utils/historyFields.js';
 
 const TEST_SAMPLE_POINTS = DEFAULT_LONG_HISTORY_POINTS;
+
+test('24-hour history includes raw interface byte counters', () => {
+  assert.ok(HISTORY_ALL_QUERY_COLUMNS.includes('net_rx'));
+  assert.ok(HISTORY_ALL_QUERY_COLUMNS.includes('net_tx'));
+});
 
 test('long-history point settings only accept supported values', () => {
   assert.equal(normalizeLongHistoryPoints(30), String(DEFAULT_LONG_HISTORY_POINTS));

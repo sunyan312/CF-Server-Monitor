@@ -9,6 +9,10 @@ let cachedRemoteVersionAt = 0;
 let cachedRemoteVersionFailureAt = 0;
 let remoteVersionPromise = null;
 
+export function getCachedRemoteVersion() {
+  return cachedRemoteVersion;
+}
+
 export async function getRemoteVersion() {
   const now = Date.now();
   if (cachedRemoteVersion && now - cachedRemoteVersionAt < REMOTE_VERSION_TTL) {
@@ -31,20 +35,20 @@ export async function getRemoteVersion() {
 async function fetchRemoteVersion(now) {
   try {
     const [versionRes, releaseRes] = await Promise.allSettled([
-      fetchWithTimeout(REMOTE_VERSION_URL, { headers: { Accept: 'application/json' } }),
-      fetchWithTimeout(AGENT_RELEASE_URL, { headers: { Accept: 'application/vnd.github+json', 'User-Agent': 'CF-Server-Monitor' } })
+      fetchJsonWithTimeout(REMOTE_VERSION_URL, { headers: { Accept: 'application/json' } }),
+      fetchJsonWithTimeout(AGENT_RELEASE_URL, { headers: { Accept: 'application/vnd.github+json', 'User-Agent': 'CF-Server-Monitor' } })
     ]);
 
     let workers;
     let agent;
 
-    if (versionRes.status === 'fulfilled' && versionRes.value.ok) {
-      const data = await versionRes.value.json();
+    if (versionRes.status === 'fulfilled' && versionRes.value) {
+      const data = versionRes.value;
       workers = typeof data.workers === 'string' ? data.workers : '';
     }
 
-    if (releaseRes.status === 'fulfilled' && releaseRes.value.ok) {
-      const release = await releaseRes.value.json();
+    if (releaseRes.status === 'fulfilled' && releaseRes.value) {
+      const release = releaseRes.value;
       const tag = typeof release.tag_name === 'string' ? release.tag_name.trim() : '';
       if (tag) {
         agent = tag;
@@ -69,11 +73,24 @@ async function fetchRemoteVersion(now) {
   }
 }
 
-async function fetchWithTimeout(url, options = {}, timeoutMs = REMOTE_VERSION_FETCH_TIMEOUT_MS) {
+async function fetchJsonWithTimeout(url, options = {}, timeoutMs = REMOTE_VERSION_FETCH_TIMEOUT_MS) {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  let timeout;
   try {
-    return await fetch(url, { ...options, signal: controller.signal });
+    // Bound the complete operation, including response.json(). A remote server can send
+    // headers promptly and then stall the body, which previously blocked /api/config.
+    return await Promise.race([
+      (async () => {
+        const response = await fetch(url, { ...options, signal: controller.signal });
+        return response.ok ? response.json() : null;
+      })(),
+      new Promise((_, reject) => {
+        timeout = setTimeout(() => {
+          controller.abort();
+          reject(new Error('Remote version request timed out'));
+        }, timeoutMs);
+      })
+    ]);
   } finally {
     clearTimeout(timeout);
   }

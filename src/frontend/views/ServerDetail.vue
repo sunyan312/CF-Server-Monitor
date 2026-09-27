@@ -92,6 +92,10 @@
           <span class="sysinfo-label">📊 {{ trans.monthlyTraffic }}</span>
           <span class="sysinfo-value sysinfo-small">↓ {{ formatBytes(server.net_rx_monthly) }} / ↑ {{ formatBytes(server.net_tx_monthly) }}</span>
         </div>
+        <div class="sysinfo-item" v-if="traffic24h">
+          <span class="sysinfo-label">🕒 {{ trans.traffic24h }}</span>
+          <span class="sysinfo-value sysinfo-small">↓ {{ formatBytes(traffic24h.rx) }} / ↑ {{ formatBytes(traffic24h.tx) }} / Σ {{ formatBytes(traffic24h.total) }}</span>
+        </div>
         <div class="sysinfo-item" v-if="server.net_rx_monthly">
           <span class="sysinfo-label">📦 {{ trans.monthlyTrafficLimit }}</span>
           <span class="sysinfo-value sysinfo-small">
@@ -414,6 +418,7 @@ import useTheme from '../composables/useTheme'
 import { isDisabledProbeMetric } from '../utils/server.js'
 import { resolvePlaybackCursor } from '../utils/playback.js'
 import { applyMikusThemeOptions } from '../utils/themeOptions.js'
+import { calculateTraffic24h } from '../utils/traffic24h.js'
 
 const route = useRoute()
 const router = useRouter()
@@ -686,6 +691,8 @@ const pingChartRef = ref(null)
 const lossChartRef = ref(null)
 const loadChartRef = ref(null)
 const historyLoaded = ref(false)
+const traffic24hRows = ref([])
+const traffic24h = computed(() => calculateTraffic24h(traffic24hRows.value, server.value))
 const hasDiskIoData = ref(false)
 
 const charts = {}
@@ -1478,6 +1485,14 @@ const loadAllHistory = async (hours) => {
   }
 }
 
+const load24hTraffic = async () => {
+  try {
+    traffic24hRows.value = await fetchAllHistory(serverId, 24, apiIndex.value)
+  } catch (error) {
+    console.error('[ERROR] Load 24h traffic failed:', error)
+  }
+}
+
 const updateAllChartTimeUnits = (hours) => {
   const maxTicks = hours <= 3 ? CHART.MAX_TICKS : CHART.MAX_TICKS_HOUR
 
@@ -1809,6 +1824,7 @@ const goToLogin = () => {
 }
 
 let liveSocket = null
+let traffic24hRefreshTimer = null
 let liveConnectionClosedByUser = false
 
 const initChartsOnMount = async () => {
@@ -1897,7 +1913,10 @@ const init = async () => {
   ])
   await initChartsOnMount()
 
-  await loadAllHistory(currentHours.value)
+  await Promise.all([loadAllHistory(currentHours.value), load24hTraffic()])
+  traffic24hRefreshTimer = window.setInterval(() => {
+    if (!document.hidden) load24hTraffic()
+  }, 5 * 60 * 1000)
   replayLatestReportUpdates(initialData)
 
   liveSocket = createLiveSocket(String(serverId), {
@@ -1924,6 +1943,7 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
+  if (traffic24hRefreshTimer !== null) clearInterval(traffic24hRefreshTimer)
   document.removeEventListener('visibilitychange', handleVisibility)
   if (liveSocket) liveSocket.close()
   clearLatestReportReplayTimers()

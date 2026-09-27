@@ -14,7 +14,7 @@ import { getServerDetail, getMetricsHistoryCache, setMetricsHistoryCache, getCac
 import { AppError, createSuccessResponse, createUnauthorizedResponse, createBadRequestResponse, createNotFoundResponse, createErrorResponse } from './utils/errors.js';
 import { verifyTurnstileToken } from './utils/common.js';
 import { getCorsAllowedOrigins, createOptionsResponse, applyCors } from './utils/cors.js';
-import { getRemoteVersion } from './utils/version.js';
+import { getCachedRemoteVersion, getRemoteVersion } from './utils/version.js';
 import {
   HISTORY_ALL_QUERY_COLUMNS
 } from './utils/historyFields.js';
@@ -189,6 +189,19 @@ export default {
     const url = new URL(request.url);
     const method = request.method;
     const path = url.pathname;
+    const isConfigRead = method === 'GET' && path === '/api/config';
+    const configStartedAt = Date.now();
+    let currentConfigStage = 'fetch-start';
+    const configStage = (stage) => {
+      currentConfigStage = stage;
+      if (isConfigRead) console.log(`[config-stage] ${stage} ${Date.now() - configStartedAt}ms`);
+    };
+    configStage('fetch-start');
+    if (isConfigRead) {
+      request.signal.addEventListener('abort', () => {
+        console.log(`[config-abort] ${currentConfigStage} ${Date.now() - configStartedAt}ms`);
+      }, { once: true });
+    }
 
     const corsAllowedOrigins = getCorsAllowedOrigins(env);
     
@@ -226,9 +239,14 @@ export default {
     ];
 
     const isApiRequest = path.startsWith('/api/') || path.startsWith('/admin/api');
-    if (path === '/api/config' || path === '/api/theme_options' || path === '/clearHistory') {
+    // An existing installation already has these tables. Avoid running schema
+    // checks and DDL on every cold-isolate config read; those extra D1 round
+    // trips can leave the homepage waiting for its 15-second request deadline.
+    const configDatabaseReady = path === '/api/config' && env.CONFIG_DATABASE_READY === 'true';
+    if (!configDatabaseReady && (path === '/api/config' || path === '/api/theme_options' || path === '/clearHistory')) {
       await initDatabase(env.DB);
     }
+    configStage('init-gate');
 
     // /api/config 在不带 X-Turnstile-Token 且不带 X-Turnstile-Verified 时仍然 bypass（用于初始化判断是否需要验证），
     // 带 token 或 verified header 时则走完整验证流程，以便复用 verified 字段返回验证结果
@@ -242,7 +260,9 @@ export default {
     let sys = null;
 
     if (isApiRequest && !isTurnstileBypassed(path)) {
+      configStage('turnstile-settings-start');
       sys = await loadSiteSettings(env.DB);
+      configStage('turnstile-settings-end');
       const turnstileEnabled = sys.turnstile_enabled === 'true';
       const turnstileSecretKey = sys.turnstile_secret_key || '';
       
@@ -293,8 +313,11 @@ export default {
         }
       }},
       { method: 'GET', path: '/api/config', handler: async () => {
+        configStage('handler-start');
         await ensureSiteSettings();
+        configStage('site-settings');
         const appearanceOptions = await loadAppearanceOptions(env.DB);
+        configStage('appearance');
         const turnstileEnabled = sys.turnstile_enabled === 'true';
         const turnstileLoginEnabled = sys.turnstile_login_enabled === 'true';
         let verified = false;
@@ -311,7 +334,12 @@ export default {
         }
 
         const isLoggedIn = await checkAuth(request, env, sys);
-        const remoteVersion = isLoggedIn ? await getRemoteVersion() : null;
+        configStage(`auth:${isLoggedIn}`);
+        // GitHub release metadata is optional. Refresh it after responding so an
+        // external fetch cannot hold the site's essential config request open.
+        const remoteVersion = isLoggedIn ? getCachedRemoteVersion() : null;
+        if (isLoggedIn) ctx.waitUntil(getRemoteVersion());
+        configStage('remote-version');
 
         return createSuccessResponse({
           version: CURRENT_VERSION,
@@ -458,6 +486,7 @@ export default {
     for (const route of routes) {
       if (route.method === method && route.path === path) {
         const response = await route.handler();
+        configStage('handler-end');
 
         // WebSocket 升级响应直接原样返回，不能修改 response 对象
         if (response.status === 101) {
@@ -481,6 +510,7 @@ export default {
           });
         }
 
+        configStage('response');
         return applyCors(response, request, corsAllowedOrigins);
       }
     }
